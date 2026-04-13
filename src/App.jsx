@@ -1,13 +1,17 @@
 import './App.css';
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { loadStripe } from '@stripe/stripe-js';
+import { CardElement, Elements, useElements, useStripe } from '@stripe/react-stripe-js';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+const stripePublicKey = import.meta.env.VITE_STRIPE_PUBLIC_KEY || '';
+const stripePromise = stripePublicKey ? loadStripe(stripePublicKey) : null;
 
 const offers = [
   {
     title: 'Évasion de printemps',
     text: 'Profitez de 15% de réduction sur une sélection de séjours urbains.',
-    cta: 'Activer l\'offre',
+    cta: "Activer l'offre",
   },
   {
     title: 'Week-end en duo',
@@ -38,6 +42,102 @@ const homesGuestsLove = [
   { name: 'Blue Harbor', city: 'Athènes', price: 'A partir de 77 EUR', score: '8,7 Superbe' },
 ];
 
+function StripePaymentForm({ paymentData, bookingForm, selectedHotel, onSuccess, onError, formatPrice }) {
+  const stripe = useStripe();
+  const elements = useElements();
+  const [paying, setPaying] = useState(false);
+  const [email, setEmail] = useState('');
+
+  const handlePay = async (event) => {
+    event.preventDefault();
+    onError('');
+
+    if (!stripe || !elements) {
+      onError('Stripe non initialisé.');
+      return;
+    }
+
+    setPaying(true);
+    try {
+      const card = elements.getElement(CardElement);
+      const confirmation = await stripe.confirmCardPayment(paymentData.clientSecret, {
+        payment_method: {
+          card,
+          billing_details: {
+            email: email || undefined,
+          },
+        },
+      });
+
+      if (confirmation.error) {
+        onError(confirmation.error.message || 'Paiement refusé.');
+        setPaying(false);
+        return;
+      }
+
+      if (!confirmation.paymentIntent || confirmation.paymentIntent.status !== 'succeeded') {
+        onError('Paiement non confirmé.');
+        setPaying(false);
+        return;
+      }
+
+      const bookingResp = await fetch(`${API_BASE_URL}/api/bookings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          hotel_id: selectedHotel.id,
+          check_in: bookingForm.checkIn,
+          check_out: bookingForm.checkOut,
+          guests_count: bookingForm.guests,
+          guest_email: email || null,
+          payment_intent_id: paymentData.payment_intent_id,
+        }),
+      });
+
+      const bookingData = await bookingResp.json();
+      if (!bookingResp.ok) {
+        throw new Error(bookingData.message || 'Erreur lors de la confirmation.');
+      }
+
+      onSuccess(bookingData);
+    } catch (error) {
+      onError(error.message || 'Paiement impossible.');
+    } finally {
+      setPaying(false);
+    }
+  };
+
+  return (
+    <form className="booking-form" onSubmit={handlePay}>
+      <div className="booking-fields">
+        <label>
+          Email (reçu)
+          <input
+            type="email"
+            placeholder="vous@email.com"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+        </label>
+      </div>
+
+      <div className="stripe-summary">
+        <strong>Total à payer :</strong> {formatPrice((paymentData.amount || 0) / 100)}
+      </div>
+
+      <div className="stripe-card-element">
+        <CardElement options={{ hidePostalCode: true }} />
+      </div>
+
+      <p className="stripe-test-hint">Carte test Stripe : 4242 4242 4242 4242 · date future · CVC au choix</p>
+
+      <button className="btn-reserver btn-full" type="submit" disabled={!stripe || paying}>
+        {paying ? 'Paiement en cours...' : 'Payer et confirmer la réservation'}
+      </button>
+    </form>
+  );
+}
+
 function App() {
   const [searchForm, setSearchForm] = useState({
     destination: '',
@@ -50,11 +150,17 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  // Booking modal state
   const [selectedHotel, setSelectedHotel] = useState(null);
   const [bookingForm, setBookingForm] = useState({ checkIn: '', checkOut: '', guests: 2 });
   const [bookingLoading, setBookingLoading] = useState(false);
-  const [bookingResult, setBookingResult] = useState(null); // { ok, message, detail }
+  const [bookingResult, setBookingResult] = useState(null);
+
+  const [paymentData, setPaymentData] = useState(null);
+  const [paymentError, setPaymentError] = useState('');
+
+  const [showReservations, setShowReservations] = useState(false);
+  const [reservations, setReservations] = useState([]);
+  const [reservationsLoading, setReservationsLoading] = useState(false);
 
   const formatPrice = (price) =>
     new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(price);
@@ -66,43 +172,26 @@ function App() {
 
   const openBooking = (hotel) => {
     setSelectedHotel(hotel);
-    setBookingForm({ checkIn: searchForm.checkIn, checkOut: searchForm.checkOut, guests: searchForm.guests });
+    setBookingForm({
+      checkIn: searchForm.checkIn,
+      checkOut: searchForm.checkOut,
+      guests: searchForm.guests,
+    });
     setBookingResult(null);
+    setPaymentData(null);
+    setPaymentError('');
   };
 
   const closeBooking = () => {
     setSelectedHotel(null);
     setBookingResult(null);
+    setPaymentData(null);
+    setPaymentError('');
   };
 
-  const onBookingFieldChange = (field) => (e) => {
-    const value = field === 'guests' ? Number.parseInt(e.target.value, 10) : e.target.value;
-    setBookingForm((prev) => ({ ...prev, [field]: value }));
-  };
-
-  const submitBooking = async (e) => {
-    e.preventDefault();
-    setBookingLoading(true);
-    setBookingResult(null);
-    try {
-      const resp = await fetch(`${API_BASE_URL}/api/bookings`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          hotel_id: selectedHotel.id,
-          check_in: bookingForm.checkIn,
-          check_out: bookingForm.checkOut,
-          guests_count: bookingForm.guests,
-        }),
-      });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.message);
-      setBookingResult({ ok: true, data });
-    } catch (err) {
-      setBookingResult({ ok: false, message: err.message });
-    } finally {
-      setBookingLoading(false);
-    }
+  const onBookingFieldChange = (field) => (event) => {
+    const value = field === 'guests' ? Number.parseInt(event.target.value, 10) : event.target.value;
+    setBookingForm((previous) => ({ ...previous, [field]: value }));
   };
 
   const runSearch = async (event) => {
@@ -121,17 +210,96 @@ function App() {
 
       const response = await fetch(`${API_BASE_URL}/api/hotels/search?${params.toString()}`);
       if (!response.ok) {
-        throw new Error('Impossible de recuperer les hotels.');
+        throw new Error('Impossible de récupérer les hôtels.');
       }
 
       const payload = await response.json();
       setSearchResults(payload.hotels || []);
     } catch (_err) {
-      setError('Recherche indisponible. Verifiez que l\'API est accessible.');
+      setError('Recherche indisponible. Vérifiez que l\'API est accessible.');
       setSearchResults([]);
     } finally {
       setLoading(false);
     }
+  };
+
+  const submitBooking = async (event) => {
+    event.preventDefault();
+    setBookingLoading(true);
+    setBookingResult(null);
+    setPaymentData(null);
+    setPaymentError('');
+
+    try {
+      // 1) Try Stripe flow first
+      const intentResp = await fetch(`${API_BASE_URL}/api/create-payment-intent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          hotel_id: selectedHotel.id,
+          check_in: bookingForm.checkIn,
+          check_out: bookingForm.checkOut,
+          guests_count: bookingForm.guests,
+        }),
+      });
+
+      if (intentResp.ok) {
+        const intentData = await intentResp.json();
+        setPaymentData(intentData);
+        return;
+      }
+
+      // 2) Fallback booking without Stripe
+      const bookingResp = await fetch(`${API_BASE_URL}/api/bookings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          hotel_id: selectedHotel.id,
+          check_in: bookingForm.checkIn,
+          check_out: bookingForm.checkOut,
+          guests_count: bookingForm.guests,
+        }),
+      });
+
+      const bookingData = await bookingResp.json();
+      if (!bookingResp.ok) {
+        throw new Error(bookingData.message || 'Erreur réservation.');
+      }
+
+      setBookingResult({ ok: true, data: bookingData });
+    } catch (error) {
+      setBookingResult({ ok: false, message: error.message || 'Erreur lors de la réservation.' });
+    } finally {
+      setBookingLoading(false);
+    }
+  };
+
+  const loadReservations = useCallback(async () => {
+    setReservationsLoading(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/bookings`);
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.message || 'Impossible de charger les réservations.');
+      }
+      setReservations(data.bookings || []);
+    } catch (_error) {
+      setReservations([]);
+    } finally {
+      setReservationsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (showReservations) {
+      loadReservations();
+    }
+  }, [showReservations, loadReservations]);
+
+  const statusClass = (status) => {
+    if (status === 'paid') return 'resa-status resa-status--paid';
+    if (status === 'confirmed') return 'resa-status resa-status--confirmed';
+    return 'resa-status resa-status--pending';
   };
 
   return (
@@ -143,6 +311,9 @@ function App() {
             <button className="text-btn">EUR</button>
             <button className="text-btn">FR</button>
             <button className="ghost-btn">Inscrire votre hebergement</button>
+            <button className="outline-btn" onClick={() => setShowReservations((prev) => !prev)}>
+              {showReservations ? 'Masquer mes réservations' : 'Mes réservations'}
+            </button>
             <button className="outline-btn">S'inscrire</button>
             <button className="outline-btn">Se connecter</button>
           </div>
@@ -208,6 +379,36 @@ function App() {
       </header>
 
       <main className="content wrap">
+        {showReservations && (
+          <section className="reservations-panel">
+            <h3>Mes réservations</h3>
+            <p className="muted">Historique des 50 dernières réservations enregistrées.</p>
+            {reservationsLoading && <p className="muted">Chargement...</p>}
+            {!reservationsLoading && reservations.length === 0 && (
+              <p className="muted">Aucune réservation pour le moment.</p>
+            )}
+            <div className="reservations-grid">
+              {reservations.map((reservation) => (
+                <article className="reservation-card" key={reservation.id}>
+                  <img src={reservation.image_url} alt={reservation.hotel_name} loading="lazy" />
+                  <div className="reservation-body">
+                    <h4>{reservation.hotel_name}</h4>
+                    <p>{reservation.city}, {reservation.country}</p>
+                    <p>
+                      {reservation.check_in} → {reservation.check_out}
+                    </p>
+                    <p>
+                      {reservation.guests_count} voyageur{reservation.guests_count > 1 ? 's' : ''}
+                    </p>
+                    <p>{formatPrice(Number.parseFloat(reservation.price_per_night))} / nuit</p>
+                    <span className={statusClass(reservation.status)}>{reservation.status || 'pending'}</span>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+        )}
+
         <section className="section">
           <h2>Resultats de recherche</h2>
           <p className="muted">Ces resultats proviennent de PostgreSQL (donnees bidon).</p>
@@ -222,7 +423,7 @@ function App() {
                 <div className="search-result-body">
                   <h3>{hotel.name}</h3>
                   <p className="muted">{hotel.city}, {hotel.country}</p>
-                  <p>Type : {hotel.type} &nbsp;·&nbsp; Max {hotel.max_guests} voyageurs</p>
+                  <p>Type : {hotel.type} · Max {hotel.max_guests} voyageurs</p>
                   <p>⭐ {hotel.rating} ({hotel.review_count} avis)</p>
                   <div className="search-result-footer">
                     <strong>{formatPrice(hotel.price_per_night)} / nuit</strong>
@@ -233,7 +434,6 @@ function App() {
             ))}
           </div>
 
-          {/* Booking modal */}
           {selectedHotel && (
             <div className="modal-overlay" onClick={closeBooking}>
               <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -243,10 +443,15 @@ function App() {
                   <div className="booking-success">
                     <div className="booking-success-icon">✅</div>
                     <h2>Réservation confirmée !</h2>
-                    <p><strong>{bookingResult.data.hotel_name}</strong> — {bookingResult.data.city}</p>
-                    <p>📅 {bookingResult.data.check_in} → {bookingResult.data.check_out} ({bookingResult.data.nights} nuit{bookingResult.data.nights > 1 ? 's' : ''})</p>
+                    <p>
+                      <strong>{bookingResult.data.hotel_name}</strong> — {bookingResult.data.city}
+                    </p>
+                    <p>
+                      {bookingResult.data.check_in} → {bookingResult.data.check_out} ({bookingResult.data.nights} nuit{bookingResult.data.nights > 1 ? 's' : ''})
+                    </p>
                     <p>👥 {bookingResult.data.guests_count} voyageur{bookingResult.data.guests_count > 1 ? 's' : ''}</p>
                     <p className="booking-total">Total : {formatPrice(bookingResult.data.total_price)}</p>
+                    {bookingResult.data.status === 'paid' && <span className="stripe-paid-badge">Paiement validé</span>}
                     <button className="btn-reserver" onClick={closeBooking}>Fermer</button>
                   </div>
                 ) : (
@@ -254,36 +459,64 @@ function App() {
                     <img src={selectedHotel.image_url} alt={selectedHotel.name} className="modal-img" />
                     <div className="modal-body">
                       <h2>{selectedHotel.name}</h2>
-                      <p className="muted">📍 {selectedHotel.city}, {selectedHotel.country} &nbsp;·&nbsp; ⭐ {selectedHotel.rating}</p>
+                      <p className="muted">
+                        {selectedHotel.city}, {selectedHotel.country} · ⭐ {selectedHotel.rating}
+                      </p>
                       <p className="modal-price">{formatPrice(selectedHotel.price_per_night)} <span>/ nuit</span></p>
 
-                      {bookingResult && !bookingResult.ok && (
-                        <p className="search-error">{bookingResult.message}</p>
+                      {bookingResult && !bookingResult.ok && <p className="search-error">{bookingResult.message}</p>}
+                      {paymentError && <p className="search-error">{paymentError}</p>}
+
+                      {!paymentData && (
+                        <form className="booking-form" onSubmit={submitBooking}>
+                          <div className="booking-fields">
+                            <label>
+                              Arrivée
+                              <input type="date" required value={bookingForm.checkIn} onChange={onBookingFieldChange('checkIn')} />
+                            </label>
+                            <label>
+                              Départ
+                              <input type="date" required value={bookingForm.checkOut} onChange={onBookingFieldChange('checkOut')} />
+                            </label>
+                            <label>
+                              Voyageurs
+                              <select value={bookingForm.guests} onChange={onBookingFieldChange('guests')}>
+                                {[1, 2, 3, 4, 5, 6, 7, 8].map((count) => (
+                                  <option key={count} value={count}>
+                                    {count} voyageur{count > 1 ? 's' : ''}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          </div>
+                          <button className="btn-reserver btn-full" type="submit" disabled={bookingLoading}>
+                            {bookingLoading ? 'Préparation du paiement...' : 'Passer au paiement'}
+                          </button>
+                        </form>
                       )}
 
-                      <form className="booking-form" onSubmit={submitBooking}>
-                        <div className="booking-fields">
-                          <label>
-                            Arrivée
-                            <input type="date" required value={bookingForm.checkIn} onChange={onBookingFieldChange('checkIn')} />
-                          </label>
-                          <label>
-                            Départ
-                            <input type="date" required value={bookingForm.checkOut} onChange={onBookingFieldChange('checkOut')} />
-                          </label>
-                          <label>
-                            Voyageurs
-                            <select value={bookingForm.guests} onChange={onBookingFieldChange('guests')}>
-                              {[1,2,3,4,5,6,7,8].map((n) => (
-                                <option key={n} value={n}>{n} voyageur{n > 1 ? 's' : ''}</option>
-                              ))}
-                            </select>
-                          </label>
-                        </div>
-                        <button className="btn-reserver btn-full" type="submit" disabled={bookingLoading}>
-                          {bookingLoading ? 'Réservation en cours...' : 'Confirmer la réservation'}
-                        </button>
-                      </form>
+                      {paymentData && (
+                        <>
+                          {stripePromise ? (
+                            <Elements stripe={stripePromise}>
+                              <StripePaymentForm
+                                paymentData={paymentData}
+                                bookingForm={bookingForm}
+                                selectedHotel={selectedHotel}
+                                onSuccess={(data) => setBookingResult({ ok: true, data })}
+                                onError={setPaymentError}
+                                formatPrice={formatPrice}
+                              />
+                            </Elements>
+                          ) : (
+                            <p className="muted">Paiement Stripe indisponible (VITE_STRIPE_PUBLIC_KEY manquant).</p>
+                          )}
+
+                          <button className="btn-back" type="button" onClick={() => setPaymentData(null)}>
+                            Retour
+                          </button>
+                        </>
+                      )}
                     </div>
                   </>
                 )}

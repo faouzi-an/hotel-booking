@@ -22,8 +22,12 @@ function seedMemDatabase(db) {
       hotel_id INT NOT NULL,
       check_in DATE NOT NULL,
       check_out DATE NOT NULL,
-      guests_count INT NOT NULL
-    );
+        guests_count INT NOT NULL,
+        guest_email VARCHAR(200),
+        payment_intent_id VARCHAR(200),
+        status VARCHAR(30) NOT NULL DEFAULT 'pending',
+        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
     INSERT INTO hotels (name,city,country,property_type,price_per_night,rating,review_count,image_url,max_guests) VALUES
       ('Grand Palais Hotel','Paris','France','hotel',189,4.8,1234,'https://images.unsplash.com/photo-1566073771259-6a8506099945?w=600&q=80',2),
       ('Rive Gauche Suites','Paris','France','appartement',149,4.6,846,'https://images.unsplash.com/photo-1502672260266-1c1ef2d93688?w=600&q=80',4),
