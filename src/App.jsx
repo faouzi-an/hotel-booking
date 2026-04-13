@@ -231,7 +231,7 @@ function App() {
     setPaymentError('');
 
     try {
-      // 1) Try Stripe flow first
+      // 1) Create Stripe payment intent
       const intentResp = await fetch(`${API_BASE_URL}/api/create-payment-intent`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -249,26 +249,11 @@ function App() {
         return;
       }
 
-      // 2) Fallback booking without Stripe
-      const bookingResp = await fetch(`${API_BASE_URL}/api/bookings`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          hotel_id: selectedHotel.id,
-          check_in: bookingForm.checkIn,
-          check_out: bookingForm.checkOut,
-          guests_count: bookingForm.guests,
-        }),
-      });
-
-      const bookingData = await bookingResp.json();
-      if (!bookingResp.ok) {
-        throw new Error(bookingData.message || 'Erreur réservation.');
-      }
-
-      setBookingResult({ ok: true, data: bookingData });
+      const errorPayload = await intentResp.json().catch(() => ({}));
+      const message = errorPayload.message || 'Paiement indisponible. Vérifiez la configuration Stripe.';
+      setPaymentError(message);
     } catch (error) {
-      setBookingResult({ ok: false, message: error.message || 'Erreur lors de la réservation.' });
+      setPaymentError(error.message || 'Erreur lors de la préparation du paiement.');
     } finally {
       setBookingLoading(false);
     }
@@ -466,6 +451,11 @@ function App() {
 
                       {bookingResult && !bookingResult.ok && <p className="search-error">{bookingResult.message}</p>}
                       {paymentError && <p className="search-error">{paymentError}</p>}
+                      {!stripePublicKey && (
+                        <p className="search-error">
+                          Paiement Stripe non configuré: variable VITE_STRIPE_PUBLIC_KEY manquante côté frontend.
+                        </p>
+                      )}
 
                       {!paymentData && (
                         <form className="booking-form" onSubmit={submitBooking}>
